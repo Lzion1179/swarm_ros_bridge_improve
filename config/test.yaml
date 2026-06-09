@@ -8,34 +8,60 @@
 ### list all <IPname: IP> here (IPname can be set arbitrarily) ###
 IP:
   self: '*'   # '*' stands for all self IPs
-  robot1: 10.5.99.142
+  robot1: 192.168.43.12
   robot2: 192.168.43.19
   robot3: 192.168.43.13
-  
+
 
 ####### Send these ROS messages to remote robots #######
+# 每个 send_topic 绑定一个端口，本机往这个端口 PUB
+# 其他设备 recv 时连同一个端口即可（方案 A：统一端口）
 send_topics:
-- topic_name: /livox/imu # send the messages of this ROS topic
-  msg_type: sensor_msgs/Imu # ROS message type (rosmsg style)
-  max_freq: 200 # max sending frequency (Hz) int
-  srcIP: self # self IP
-  srcPort: 3001 # ports of send_topics should be different
+- topic_name: /uav1/livox/imu      # send the messages of this ROS topic
+  msg_type: sensor_msgs/Imu   # ROS message type (rosmsg style)
+  max_freq: 200               # max sending frequency (Hz) int
+  srcIP: self                 # self IP
+  srcPort: 3001               # 所有设备统一用 3001 发 /livox/imu
 
-
+- topic_name: /uav1/cmd_vel        # send the messages of this ROS topic
+  msg_type: geometry_msgs/Twist
+  max_freq: 50
+  srcIP: self
+  srcPort: 3002               # 所有设备统一用 3002 发 /cmd_vel
 
 
 ####### receive these ROS messages from remote robots #######
-## if no recv_topics needed, comment all these out
 recv_topics:
-- topic_name: /livox/imu # send the messages of this ROS topic
-  msg_type: sensor_msgs/Imu # ROS message type (rosmsg style)
-  srcIP: robot2 
-  srcPort: 3002 # ports of send_topics should be different
 
-- topic_name: /livox/imu # send the messages of this ROS topic
-  msg_type: sensor_msgs/Imu # ROS message type (rosmsg style)
-  srcIP: robot3 
-  srcPort: 3003 # ports of send_topics should be different
- 
+# 从 robot1 收 2 个话题（仅 robot2/3 生效，robot1 会自动跳过自己）
+- topic_name: /uav1/livox/imu
+  msg_type: sensor_msgs/Imu
+  srcIP: robot2
+  srcPort: 3001               # robot1 的 /livox/imu 发在 3001
 
+- topic_name: /uav1/cmd_vel
+  msg_type: geometry_msgs/Twist
+  srcIP: robot2
+  srcPort: 3002               # robot1 的 /cmd_vel 发在 3002
 
+# 从 robot2 收 2 个话题（仅 robot1/3 生效，robot2 会自动跳过自己）
+- topic_name: /uav2/livox/imu
+  msg_type: sensor_msgs/Imu
+  srcIP: robot2
+  srcPort: 3001               # robot2 的 /livox/imu 发在 3001
+
+- topic_name: /uav2/cmd_vel
+  msg_type: geometry_msgs/Twist
+  srcIP: robot2
+  srcPort: 3002               # robot2 的 /cmd_vel 发在 3002
+
+# 从 robot3 收 2 个话题（仅 robot1/2 生效，robot3 会自动跳过自己）
+- topic_name: /uav3/livox/imu
+  msg_type: sensor_msgs/Imu
+  srcIP: robot3
+  srcPort: 3001               # robot3 的 /livox/imu 发在 3001
+
+- topic_name: /uav3/cmd_vel
+  msg_type: geometry_msgs/Twist
+  srcIP: robot3
+  srcPort: 3002               # robot3 的 /cmd_vel 发在 3002
