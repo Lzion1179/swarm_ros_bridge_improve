@@ -22,6 +22,15 @@
  */
 
 #include "bridge_node.hpp"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/select.h>
+#include <unistd.h>
+#include <set>
+#include <algorithm>
 
 /* Detect all local non-loopback IPv4 addresses */
 std::vector<std::string> get_self_ips()
@@ -63,10 +72,57 @@ bool ping_ip(const std::string &ip, int timeout_sec)
   return (system(cmd.c_str()) == 0);
 }
 
+/* Check if a TCP port is open on a remote host (non-blocking connect with timeout) */
+bool check_tcp_port(const std::string &ip, int port, int timeout_sec)
+{
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0)
+    return false;
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
+  {
+    close(sock);
+    return false;
+  }
+
+  // Set non-blocking for timeout control
+  int flags = fcntl(sock, F_GETFL, 0);
+  fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+  bool result = false;
+  int ret = connect(sock, (struct sockaddr*)&addr, sizeof(addr));
+  if (ret == 0)
+  {
+    result = true;  // Connected immediately (unlikely but possible on localhost)
+  }
+  else if (errno == EINPROGRESS)
+  {
+    fd_set fdset;
+    FD_ZERO(&fdset);
+    FD_SET(sock, &fdset);
+    struct timeval tv = {timeout_sec, 0};
+    if (select(sock + 1, NULL, &fdset, NULL, &tv) > 0)
+    {
+      int so_error = 0;
+      socklen_t len = sizeof(so_error);
+      getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+      result = (so_error == 0);
+    }
+  }
+  close(sock);
+  return result;
+}
+
 /* Global state for connectivity monitoring */
 bool connectivity_monitor_flag = false;
 std::thread connectivity_monitor_thread;
 std::map<std::string, bool> connectivity_status;
+std::map<std::string, std::vector<int>> host_connect_ports;
+std::vector<std::string> g_self_ips;
 
 /* Background thread: periodically check connectivity, report state changes */
 void connectivity_monitor_func()
@@ -85,7 +141,36 @@ void connectivity_monitor_func()
       if (host_ip == "*")
         continue;
 
-      bool reachable = ping_ip(host_ip);
+      // Use TCP port check: try each configured port for this host
+      bool reachable = false;
+      auto hp_it = host_connect_ports.find(host_name);
+      if (hp_it != host_connect_ports.end() && !hp_it->second.empty())
+      {
+        for (int port : hp_it->second)
+        {
+          if (check_tcp_port(host_ip, port))
+          {
+            reachable = true;
+            break;
+          }
+        }
+      }
+      else
+      {
+        // No specific recv_topics for this host, try all known ports from other hosts
+        for (const auto &pair : host_connect_ports)
+        {
+          for (int port : pair.second)
+          {
+            if (check_tcp_port(host_ip, port))
+            {
+              reachable = true;
+              break;
+            }
+          }
+          if (reachable) break;
+        }
+      }
       auto it = connectivity_status.find(host_name);
 
       if (it == connectivity_status.end())
@@ -126,7 +211,7 @@ void connectivity_monitor_func()
           std::cout << "\r\033[32m[ OK ] " << host_name << " (" << host_ip << ")"
                   << " is connected\033[0m" << std::endl;
         } else {
-          std::cout << "\r\033[31m[FAIL] " << host_name << " (" << host_ip << ")" 
+          std::cout << "\r\033[31m[FAIL] " << host_name << " (" << host_ip << ")"
                   << " is not connected\033[0m"<< std::endl;
         }
       }
@@ -366,21 +451,36 @@ void connectivity_monitor_func()
 
     // ******************** Self IP Detection **************************
     std::cout << "\n\r\033[34m--------self IP detected------\033[0m" << std::endl;
-    std::vector<std::string> self_ips = get_self_ips();
-    if (self_ips.empty())
+    g_self_ips = get_self_ips();
+    if (g_self_ips.empty())
     {
       ROS_WARN("[bridge node] No network interface detected! Using loopback.");
       std::cout << "127.0.0.1 (fallback)" << std::endl;
     }
     else
     {
-      for (const auto &ip : self_ips)
+      for (const auto &ip : g_self_ips)
       {
         std::cout << ip << std::endl;
       }
     }
 
     // ******************** Connectivity Check **************************
+    // Build host->ports mapping from recv_topics for TCP port detection
+    host_connect_ports.clear();
+    for (int32_t i = 0; i < len_recv; ++i)
+    {
+      ROS_ASSERT(recv_topics_xml[i].getType() == XmlRpc::XmlRpcValue::TypeStruct);
+      std::string srcIP_name = recv_topics_xml[i]["srcIP"];
+      int srcPort = recv_topics_xml[i]["srcPort"];
+      // Only add if not already present for this host
+      if (std::find(host_connect_ports[srcIP_name].begin(),
+                    host_connect_ports[srcIP_name].end(), srcPort) == host_connect_ports[srcIP_name].end())
+      {
+        host_connect_ports[srcIP_name].push_back(srcPort);
+      }
+    }
+
     std::cout << "\r\033[34m-----connectivity check-------\033[0m" << std::endl;
     for (auto iter = ip_xml.begin(); iter != ip_xml.end(); ++iter)
     {
@@ -390,7 +490,37 @@ void connectivity_monitor_func()
       if (host_ip == "*")
         continue;
 
-      bool reachable = ping_ip(host_ip);
+      // Use TCP port check: try each configured port for this host
+      bool reachable = false;
+      auto hp_it = host_connect_ports.find(host_name);
+      if (hp_it != host_connect_ports.end() && !hp_it->second.empty())
+      {
+        for (int port : hp_it->second)
+        {
+          if (check_tcp_port(host_ip, port))
+          {
+            reachable = true;
+            break;
+          }
+        }
+      }
+      else
+      {
+        // No specific recv_topics for this host, try all known ports from other hosts
+        for (const auto &pair : host_connect_ports)
+        {
+          for (int port : pair.second)
+          {
+            if (check_tcp_port(host_ip, port))
+            {
+              reachable = true;
+              break;
+            }
+          }
+          if (reachable) break;
+        }
+      }
+
       connectivity_status[host_name] = reachable;
       if (reachable)
       {
@@ -475,11 +605,16 @@ void connectivity_monitor_func()
     // receive sockets (zmq socket SUB mode)
     for (int32_t i = 0; i < len_recv; ++i)
     {
-      const std::string url = "tcp://" + recvTopics[i].ip + ":" + std::to_string(recvTopics[i].port);
-      std::string const zmq_topic = ""; // "" means all zmq topic
+      // Check if target IP is local (avoid self-reception feedback loop)
+      bool is_self = (std::find(g_self_ips.begin(), g_self_ips.end(), recvTopics[i].ip) != g_self_ips.end());
       std::unique_ptr<zmqpp::socket> receiver(new zmqpp::socket(context, zmqpp::socket_type::sub));
+      std::string const zmq_topic = ""; // "" means all zmq topic
       receiver->subscribe(zmq_topic);
-      receiver->connect(url);
+      if (!is_self)
+      {
+        const std::string url = "tcp://" + recvTopics[i].ip + ":" + std::to_string(recvTopics[i].port);
+        receiver->connect(url);
+      }
       receivers.emplace_back(std::move(receiver));
     }
 

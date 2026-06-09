@@ -87,11 +87,14 @@ void stop_recv(int i);
 // ***************** network detection utilities ********************
 std::vector<std::string> get_self_ips();
 bool ping_ip(const std::string &ip, int timeout_sec = 1);
+bool check_tcp_port(const std::string &ip, int port, int timeout_sec = 1);
+extern std::vector<std::string> g_self_ips;
 
 // ***************** connectivity monitor thread *********************
 extern bool connectivity_monitor_flag;
 extern std::thread connectivity_monitor_thread;
 extern std::map<std::string, bool> connectivity_status;
+extern std::map<std::string, std::vector<int>> host_connect_ports;
 void connectivity_monitor_func();
 
 #endif
